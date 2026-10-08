@@ -6,7 +6,7 @@ creation_date: 2024-04-30T16:22:36.461+02:00[GMT+02:00]
 operating_system: Linux
 mcc_mode: IDE
 mcc_mode_version: v6.20
-device_name: PIC32MZ1025W104132
+device_name: PIC32MZ2051W104132
 compiler: XC32 4.35
 mcc_version: 5.5.1
 mcc_core_version: 5.7.1
@@ -16,5 +16,5 @@ is_using_prerelease_versions: false
 mcc_content_registries: https://registry.npmjs.org/
 device_library: {library_class: com.microchip.mcc.harmony.Harmony3Library, name: Harmony
     V3, version: 1.3.2}
-packs: {name: PIC32MZ-W_DFP, version: 1.8.326}
+packs: {name: PIC32MZ-W_DFP, version: 1.10.334}
 modules: []

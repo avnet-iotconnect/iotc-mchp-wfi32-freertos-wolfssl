@@ -1,6 +1,8 @@
 # IntelliJ products
 /.idea/
 
+.vscode
+
 # Ignoring files according to https://microchipdeveloper.com/mplabx:version-control-working-with
 /firmware/iotc-wfi32-aws-demo.X/.generated_files/
 /firmware/iotc-wfi32-aws-demo.X/build/

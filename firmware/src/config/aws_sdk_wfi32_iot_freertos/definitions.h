@@ -119,7 +119,11 @@ extern "C" {
 // DOM-IGNORE-END
 
 /* Device Information */
+#if defined(__32MZ1025W104132__)
 #define DEVICE_NAME			 "PIC32MZ1025W104132"
+#else
+#define DEVICE_NAME			 "PIC32MZ2051W104132"
+#endif
 #define DEVICE_ARCH			 "MIPS"
 #define DEVICE_FAMILY		 "PIC32MZW"
 #define DEVICE_SERIES		 "PIC32MZW"

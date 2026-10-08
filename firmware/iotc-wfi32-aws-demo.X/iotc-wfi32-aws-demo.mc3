@@ -1,4 +1,4 @@
-<config configName="default" projectName="iotc-wfi32-aws-demo" configVersion="1.1" device="PIC32MZ1025W104132" deviceLibraryClass="com.microchip.mcc.harmony.Harmony3Library" coreVersion="5.7.1">
+<config configName="default" projectName="iotc-wfi32-aws-demo" configVersion="1.1" device="PIC32MZ2051W104132" deviceLibraryClass="com.microchip.mcc.harmony.Harmony3Library" coreVersion="5.7.1">
    <usedPackages class="java.util.ArrayList"/>
    <usedClasses class="java.util.TreeMap">
       <entry>
@@ -23875,7 +23875,7 @@
          <hash>7ad9faa903d8587bab9490660328f134b8e027f9c24bca47201f3f96f3b99474</hash>
       </entry>
       <entry>
-         <file>../src/config/default/p32MZ1025W104132.ld</file>
+         <file>../src/config/default/p32MZ2051W104132.ld</file>
          <hash>ed773c18bcb76a06cb673da8ddabc215598912f30a7ccc69f9f56643b6766ce0</hash>
       </entry>
       <entry>

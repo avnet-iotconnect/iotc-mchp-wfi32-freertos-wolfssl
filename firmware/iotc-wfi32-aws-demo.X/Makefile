@@ -53,6 +53,10 @@ RANLIB=ranlib
 # build
 build: .build-post
 
+.PHONY: board-v1
+board-v1:
+	${MAKE} -f nbproject/Makefile-aws_sdk_wfi32_iot_freertos.mk SUBPROJECTS= MP_PROCESSOR_OPTION=32MZ1025W104132 MP_LINKER_FILE_OPTION=,--script=../src/config/aws_sdk_wfi32_iot_freertos/p32MZ2051W104132.ld,--defsym=_wfi32_program_size=0x100000,--defsym=_wfi32_ram_size=0x40000 OBJECTDIR=build/wfi32_board_v1/production DISTDIR=dist/wfi32_board_v1/production .build-conf
+
 .build-pre:
 # Add your pre 'build' code here...
 
