@@ -882,6 +882,7 @@
       <itemPath>../src/iotconnect.h</itemPath>
       <itemPath>../src/app_iotconnect.h</itemPath>
       <itemPath>../src/iotc_ca_certs.h</itemPath>
+      <itemPath>../src/ws2812_spi.h</itemPath>
     </logicalFolder>
     <logicalFolder name="ExternalFiles"
                    displayName="Important Files"
@@ -1636,6 +1637,7 @@
       <itemPath>../src/iotc_https.c</itemPath>
       <itemPath>../src/iotconnect.c</itemPath>
       <itemPath>../src/app_iotconnect.c</itemPath>
+      <itemPath>../src/ws2812_spi.c</itemPath>
     </logicalFolder>
   </logicalFolder>
   <sourceRootList>
@@ -2117,8 +2119,6 @@
                   value="${memories.instruction.ram.ranges}"/>
         <property key="memories.programmemory" value="true"/>
         <property key="memories.programmemory.ranges" value="10000000-100fffff"/>
-        <property key="programmerToGoFilePath"
-                  value="C:/microchip/harmony_3/w/apps/rio2_h3_cloudO/cloud_sdk_demo/firmware/aws_sdk_wfi32_iot_freertos.X/debug/aws_sdk_wfi32_iot_freertos/aws_sdk_wfi32_iot_freertos_ptg"/>
         <property key="programoptions.donoteraseauxmem" value="false"/>
         <property key="programoptions.eraseb4program" value="true"/>
         <property key="programoptions.pgmentry.voltage" value="low"/>

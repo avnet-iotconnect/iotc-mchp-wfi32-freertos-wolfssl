@@ -30,6 +30,7 @@
 #include "app_common.h"
 #include "app.h"
 #include "app_aws.h"
+#include "ws2812_spi.h"
 #include "app_device.h"
 #include "app_usb_msd.h"
 
@@ -109,6 +110,9 @@ static void app_iotc_command_cb(IotclC2dEventData data)
     } else if (0 == strcmp(command, "led-red off")) {
         APP_IOTC_PRNT("LED RED: OFF\r\n");
         app_deviceData.LED_Red = false;
+    } else if (WS2812_HandleCommand(command, &handled)) {
+        /* "strip fill|pixel|brightness|off ..." -> WS2812B strip on mikroBUS MOSI */
+        APP_IOTC_PRNT("LED STRIP: %s (%s)\r\n", command, handled ? "ok" : "failed");
     } else {
         APP_IOTC_PRNT("Unknown COMMAND: %s\r\n", command);
         handled = false;
