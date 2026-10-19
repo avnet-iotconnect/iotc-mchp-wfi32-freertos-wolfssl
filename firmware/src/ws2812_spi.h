@@ -73,9 +73,31 @@ uint8_t WS2812_GetBrightness(void);
  * Returns false if SPI2 is in use by something else; nothing is sent then. */
 bool WS2812_Show(void);
 
-/* Whole strip steps red -> green -> blue every period_ms (50..60000) from a
- * small FreeRTOS task, until WS2812_StopCycle().  Calling it again while it
- * runs just changes the period.  Returns false on a bad period / no memory. */
+/* Animated patterns, run by a small FreeRTOS task (created on first use, its
+ * stack comes from the heap).  One pattern runs at a time; starting another
+ * replaces it.  The pattern colour is used where a pattern has one colour. */
+typedef enum
+{
+    WS2812_FX_CYCLE = 0,    /* whole strip red -> green -> blue           1000 ms */
+    WS2812_FX_CHASE,        /* one pixel running along the strip            40 ms */
+    WS2812_FX_COMET,        /* head with a fading 10-pixel tail             30 ms */
+    WS2812_FX_SCANNER,      /* "Knight Rider", bounces end to end           25 ms */
+    WS2812_FX_RAINBOW,      /* moving rainbow (ignores colour)              30 ms */
+    WS2812_FX_WIPE,         /* fills pixel by pixel, then empties           30 ms */
+    WS2812_FX_THEATER,      /* every 3rd pixel lit, marching               120 ms */
+    WS2812_FX_BREATHE,      /* whole strip fades in and out (2 s @ 20 ms)   20 ms */
+    WS2812_FX_TWINKLE,      /* random sparkles that fade                    60 ms */
+    WS2812_FX_COUNT
+} ws2812_fx_t;
+
+/* period_ms = time per frame, 20..60000, or 0 for the pattern's default.
+ * rgb = {r, g, b} pattern colour, or NULL for the pattern's default.
+ * Returns false on bad arguments or when out of memory. */
+bool WS2812_StartEffect(ws2812_fx_t fx, uint32_t period_ms, const uint8_t *rgb);
+void WS2812_StopEffect(void);               /* freezes on the current frame */
+const char *WS2812_EffectName(ws2812_fx_t fx);
+
+/* Same as WS2812_StartEffect(WS2812_FX_CYCLE, ...) / WS2812_StopEffect(). */
 bool WS2812_StartCycle(uint32_t period_ms);
 void WS2812_StopCycle(void);
 
@@ -83,9 +105,13 @@ void WS2812_StopCycle(void);
  *   "strip fill <r> <g> <b>"           all pixels, 0..255 each
  *   "strip pixel <i> <r> <g> <b>"      one pixel, i = 0..WS2812_NUM_PIXELS-1
  *   "strip brightness <0..255>"
- *   "strip off"
- *   "strip cycle [ms]"                 red -> green -> blue, default 1000 ms
- * fill / pixel / off stop a running cycle; brightness applies to it.
+ *   "strip off"                        stop any pattern, all pixels off
+ *   "strip run <pattern> [ms] [r g b]" start a pattern (names as in ws2812_fx_t:
+ *                                      cycle chase comet scanner rainbow wipe
+ *                                      theater breathe twinkle)
+ *   "strip stop"                       freeze the pattern on its current frame
+ *   "strip cycle [ms]"                 same as "strip run cycle [ms]"
+ * fill / pixel / off stop a running pattern; brightness applies to it.
  * The strip is updated before returning.  *ok is set to false when the text is
  * a strip command but its arguments are invalid or the SPI is busy. */
 bool WS2812_HandleCommand(const char *command, bool *ok);

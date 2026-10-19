@@ -26,12 +26,11 @@
 #define WS2812_RESET_WORDS          24U
 #define WS2812_FRAME_WORDS          (WS2812_DATA_WORDS + WS2812_RESET_WORDS)
 
-/* Colour cycle ("strip cycle") */
-#define WS2812_CYCLE_DEFAULT_MS     1000U
-#define WS2812_CYCLE_MIN_MS         50U
-#define WS2812_CYCLE_MAX_MS         60000U
-#define WS2812_CYCLE_TASK_STACK     256U        /* words */
-#define WS2812_CYCLE_TASK_PRIO      (tskIDLE_PRIORITY + 1U)
+/* Animated patterns ("strip run", "strip cycle") */
+#define WS2812_FX_MIN_MS            20U
+#define WS2812_FX_MAX_MS            60000U
+#define WS2812_FX_TASK_STACK        256U        /* words */
+#define WS2812_FX_TASK_PRIO         (tskIDLE_PRIORITY + 1U)
 
 /* ---- state --------------------------------------------------------------- */
 
@@ -47,19 +46,42 @@ typedef struct
     uint8_t  rgb[WS2812_NUM_PIXELS][3];     /* r, g, b as the user set them */
     uint8_t  brightness;
 
-    /* colour cycle -- all fields protected by lock */
-    bool     cycle_on;
-    uint8_t  cycle_step;                    /* 0 = red, 1 = green, 2 = blue */
-    uint32_t cycle_ms;
+    /* running pattern -- all fields protected by lock */
+    bool        fx_on;
+    ws2812_fx_t fx;
+    uint32_t    fx_ms;
+    uint32_t    fx_step;
+    uint8_t     fx_rgb[3];                  /* pattern colour */
+    uint32_t    fx_rand;                    /* PRNG state for twinkle */
 #ifndef WS2812_HOST_TEST
     SemaphoreHandle_t lock;
-    TaskHandle_t      cycle_task;
+    TaskHandle_t      fx_task;
 #else
-    bool              cycle_task;
+    bool              fx_task;
 #endif
 } ws2812_ctx_t;
 
 static ws2812_ctx_t *s_ctx = NULL;
+
+/* Name, default step time and default colour of each pattern.  Kept in flash. */
+typedef struct
+{
+    const char *name;
+    uint16_t    ms;
+    uint8_t     rgb[3];
+} ws2812_fx_info_t;
+
+static const ws2812_fx_info_t k_fx[WS2812_FX_COUNT] = {
+    [WS2812_FX_CYCLE]   = { "cycle",   1000U, { 255U,   0U,   0U } },
+    [WS2812_FX_CHASE]   = { "chase",     40U, { 255U,   0U,   0U } },
+    [WS2812_FX_COMET]   = { "comet",     30U, {   0U, 120U, 255U } },
+    [WS2812_FX_SCANNER] = { "scanner",   25U, { 255U,   0U,   0U } },
+    [WS2812_FX_RAINBOW] = { "rainbow",   30U, { 255U, 255U, 255U } },
+    [WS2812_FX_WIPE]    = { "wipe",      30U, {   0U, 255U,   0U } },
+    [WS2812_FX_THEATER] = { "theater",  120U, { 255U, 140U,  40U } },
+    [WS2812_FX_BREATHE] = { "breathe",   20U, { 160U,   0U, 255U } },
+    [WS2812_FX_TWINKLE] = { "twinkle",   60U, { 255U, 255U, 255U } },
+};
 
 /* ---- OS glue ------------------------------------------------------------- */
 
@@ -69,15 +91,15 @@ static ws2812_ctx_t *s_ctx = NULL;
 static bool ws2812_os_init(ws2812_ctx_t *c) { (void)c; return true; }
 static void ws2812_lock(void)   { }
 static void ws2812_unlock(void) { }
-static bool ws2812_cycle_task_start(void) { s_ctx->cycle_task = true; return true; }
+static bool ws2812_fx_task_start(void) { s_ctx->fx_task = true; return true; }
 #else
 #define ws2812_alloc(n)     pvPortMalloc(n)
 #define ws2812_free(p)      vPortFree(p)
 
 static bool ws2812_os_init(ws2812_ctx_t *c)
 {
-    c->lock       = xSemaphoreCreateMutex();
-    c->cycle_task = NULL;
+    c->lock    = xSemaphoreCreateMutex();
+    c->fx_task = NULL;
     return c->lock != NULL;
 }
 
@@ -91,17 +113,17 @@ static void ws2812_unlock(void)
     (void)xSemaphoreGive(s_ctx->lock);
 }
 
-static void ws2812_cycle_task(void *arg);
+static void ws2812_fx_task(void *arg);
 
 /* Called with the lock held. */
-static bool ws2812_cycle_task_start(void)
+static bool ws2812_fx_task_start(void)
 {
-    if (s_ctx->cycle_task != NULL)
+    if (s_ctx->fx_task != NULL)
     {
-        return true;                    /* already running; picks up new period */
+        return true;            /* already running; it picks up the new pattern */
     }
-    return xTaskCreate(ws2812_cycle_task, "ws2812", WS2812_CYCLE_TASK_STACK,
-                       NULL, WS2812_CYCLE_TASK_PRIO, &s_ctx->cycle_task) == pdPASS;
+    return xTaskCreate(ws2812_fx_task, "ws2812", WS2812_FX_TASK_STACK,
+                       NULL, WS2812_FX_TASK_PRIO, &s_ctx->fx_task) == pdPASS;
 }
 #endif
 
@@ -292,35 +314,183 @@ static bool show_locked(void)
     return true;
 }
 
-/* Paint the current cycle colour and advance to the next one. */
-static void cycle_step_locked(void)
-{
-    static const uint8_t k_colours[3][3] = {
-        { 255U, 0U, 0U }, { 0U, 255U, 0U }, { 0U, 0U, 255U }
-    };
-    const uint8_t *c = k_colours[s_ctx->cycle_step % 3U];
+/* ---- patterns ------------------------------------------------------------ */
 
-    fill_locked(c[0], c[1], c[2]);
+/* Pixel i = pattern colour scaled by level/255 (level squared for a smoother
+ * fade to the eye). */
+static void put_level(uint32_t i, uint32_t level)
+{
+    uint32_t l = (level * level + 254U) / 255U;
+    for (uint32_t c = 0U; c < 3U; c++)
+    {
+        s_ctx->rgb[i][c] = (uint8_t)((s_ctx->fx_rgb[c] * l + 127U) / 255U);
+    }
+}
+
+/* Colour wheel: 0..255 -> red -> green -> blue -> red. */
+static void wheel(uint32_t pos, uint8_t out[3])
+{
+    pos &= 0xFFU;
+    if (pos < 85U)
+    {
+        out[0] = (uint8_t)(255U - pos * 3U); out[1] = (uint8_t)(pos * 3U); out[2] = 0U;
+    }
+    else if (pos < 170U)
+    {
+        pos -= 85U;
+        out[0] = 0U; out[1] = (uint8_t)(255U - pos * 3U); out[2] = (uint8_t)(pos * 3U);
+    }
+    else
+    {
+        pos -= 170U;
+        out[0] = (uint8_t)(pos * 3U); out[1] = 0U; out[2] = (uint8_t)(255U - pos * 3U);
+    }
+}
+
+static uint32_t next_rand(void)
+{
+    /* xorshift32 */
+    uint32_t x = s_ctx->fx_rand;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    s_ctx->fx_rand = x;
+    return x;
+}
+
+#define N   WS2812_NUM_PIXELS
+
+/* Draw frame number s of the current pattern into rgb[]. */
+static void fx_render_locked(uint32_t s)
+{
+    switch (s_ctx->fx)
+    {
+    case WS2812_FX_CYCLE:               /* whole strip red -> green -> blue */
+    {
+        static const uint8_t k_rgb[3][3] = {
+            { 255U, 0U, 0U }, { 0U, 255U, 0U }, { 0U, 0U, 255U }
+        };
+        const uint8_t *c = k_rgb[s % 3U];
+        fill_locked(c[0], c[1], c[2]);
+        break;
+    }
+
+    case WS2812_FX_CHASE:               /* one pixel running along the strip */
+        fill_locked(0U, 0U, 0U);
+        put_level(s % N, 255U);
+        break;
+
+    case WS2812_FX_COMET:               /* head with a 10-pixel fading tail */
+    {
+        const uint32_t tail = (N < 10U) ? N : 10U;
+        uint32_t head = s % N;
+        fill_locked(0U, 0U, 0U);
+        for (uint32_t k = 0U; k < tail; k++)
+        {
+            put_level((head + N - k) % N, 255U * (tail - k) / tail);
+        }
+        break;
+    }
+
+    case WS2812_FX_SCANNER:             /* bounces end to end, short tail */
+    {
+        const uint32_t tail = 6U;
+        uint32_t period = (N > 1U) ? 2U * (N - 1U) : 1U;
+        uint32_t pos    = s % period;
+        bool     fwd    = pos < N;
+        uint32_t head   = fwd ? pos : period - pos;
+        fill_locked(0U, 0U, 0U);
+        for (uint32_t k = 0U; k < tail; k++)
+        {
+            int32_t i = fwd ? (int32_t)head - (int32_t)k : (int32_t)head + (int32_t)k;
+            if (i >= 0 && i < (int32_t)N)
+            {
+                put_level((uint32_t)i, 255U * (tail - k) / tail);
+            }
+        }
+        break;
+    }
+
+    case WS2812_FX_RAINBOW:             /* full rainbow across the strip, moving */
+        for (uint32_t i = 0U; i < N; i++)
+        {
+            wheel(i * 256U / N + s * 4U, s_ctx->rgb[i]);
+        }
+        break;
+
+    case WS2812_FX_WIPE:                /* fill pixel by pixel, then empty */
+    {
+        uint32_t pos = s % (2U * N);
+        for (uint32_t i = 0U; i < N; i++)
+        {
+            bool lit = (pos < N) ? (i <= pos) : (i > pos - N);
+            put_level(i, lit ? 255U : 0U);
+        }
+        break;
+    }
+
+    case WS2812_FX_THEATER:             /* every 3rd pixel lit, marching */
+        for (uint32_t i = 0U; i < N; i++)
+        {
+            put_level(i, ((i + s) % 3U == 0U) ? 255U : 0U);
+        }
+        break;
+
+    case WS2812_FX_BREATHE:             /* whole strip fades in and out */
+    {
+        uint32_t t     = s % 100U;
+        uint32_t level = (t < 50U) ? t * 255U / 49U : (99U - t) * 255U / 49U;
+        for (uint32_t i = 0U; i < N; i++)
+        {
+            put_level(i, level);
+        }
+        break;
+    }
+
+    case WS2812_FX_TWINKLE:             /* random sparkles that fade out */
+        if (s == 0U)
+        {
+            fill_locked(0U, 0U, 0U);
+        }
+        for (uint32_t i = 0U; i < N; i++)
+        {
+            for (uint32_t c = 0U; c < 3U; c++)
+            {
+                s_ctx->rgb[i][c] = (uint8_t)(s_ctx->rgb[i][c] * 3U / 4U);
+            }
+        }
+        put_level(next_rand() % N, 255U);
+        break;
+
+    default:
+        break;
+    }
+}
+
+#undef N
+
+/* One animation frame: draw, send, advance. */
+static void fx_step_locked(void)
+{
+    fx_render_locked(s_ctx->fx_step);
     (void)show_locked();
-    s_ctx->cycle_step = (uint8_t)((s_ctx->cycle_step + 1U) % 3U);
+    s_ctx->fx_step++;
 }
 
 #ifndef WS2812_HOST_TEST
-static void ws2812_cycle_task(void *arg)
+static void ws2812_fx_task(void *arg)
 {
     (void)arg;
 
     for (;;)
     {
         ws2812_lock();
-        if (!s_ctx->cycle_on)
+        if (!s_ctx->fx_on)
         {
-            s_ctx->cycle_task = NULL;       /* a later "strip cycle" starts a new task */
+            s_ctx->fx_task = NULL;          /* a later "strip run" starts a new task */
             ws2812_unlock();
             vTaskDelete(NULL);
         }
-        cycle_step_locked();
-        uint32_t ms = s_ctx->cycle_ms;
+        fx_step_locked();
+        uint32_t ms = s_ctx->fx_ms;
         ws2812_unlock();
 
         vTaskDelay(pdMS_TO_TICKS(ms));
@@ -341,7 +511,7 @@ bool WS2812_Initialize(void)
         }
         memset(c, 0, sizeof(*c));
         c->brightness = 255U;
-        c->cycle_ms   = WS2812_CYCLE_DEFAULT_MS;
+        c->fx_rand    = 0x2545F491U;
         if (!ws2812_os_init(c))
         {
             ws2812_free(c);
@@ -406,52 +576,73 @@ bool WS2812_Show(void)
     return ok;
 }
 
-bool WS2812_StartCycle(uint32_t period_ms)
+const char *WS2812_EffectName(ws2812_fx_t fx)
 {
-    if (!WS2812_Initialize() ||
-        period_ms < WS2812_CYCLE_MIN_MS || period_ms > WS2812_CYCLE_MAX_MS)
+    return ((uint32_t)fx < (uint32_t)WS2812_FX_COUNT) ? k_fx[fx].name : NULL;
+}
+
+bool WS2812_StartEffect(ws2812_fx_t fx, uint32_t period_ms, const uint8_t *rgb)
+{
+    if (!WS2812_Initialize() || (uint32_t)fx >= (uint32_t)WS2812_FX_COUNT)
+    {
+        return false;
+    }
+    if (period_ms == 0U)
+    {
+        period_ms = k_fx[fx].ms;
+    }
+    if (period_ms < WS2812_FX_MIN_MS || period_ms > WS2812_FX_MAX_MS)
     {
         return false;
     }
 
     ws2812_lock();
-    bool was_on        = s_ctx->cycle_on;
-    s_ctx->cycle_ms    = period_ms;
-    s_ctx->cycle_on    = true;
-    if (!was_on)
-    {
-        s_ctx->cycle_step = 0U;
-    }
-    bool ok = ws2812_cycle_task_start();
+    s_ctx->fx      = fx;
+    s_ctx->fx_ms   = period_ms;
+    s_ctx->fx_step = 0U;                    /* restart the pattern from frame 0 */
+    memcpy(s_ctx->fx_rgb, (rgb != NULL) ? rgb : k_fx[fx].rgb, 3U);
+    s_ctx->fx_on   = true;
+    bool ok = ws2812_fx_task_start();
     if (!ok)
     {
-        s_ctx->cycle_on = false;
+        s_ctx->fx_on = false;
     }
     ws2812_unlock();
     return ok;
 }
 
-void WS2812_StopCycle(void)
+void WS2812_StopEffect(void)
 {
     if (s_ctx != NULL)
     {
         ws2812_lock();
-        s_ctx->cycle_on = false;            /* the task exits at its next wake-up */
+        s_ctx->fx_on = false;               /* the task exits at its next wake-up */
         ws2812_unlock();
     }
 }
 
-#ifdef WS2812_HOST_TEST
-/* Test hook: run one cycle step as the task would. */
-void ws2812_test_cycle_step(void)
+bool WS2812_StartCycle(uint32_t period_ms)
 {
-    if (s_ctx != NULL && s_ctx->cycle_on)
+    return WS2812_StartEffect(WS2812_FX_CYCLE, period_ms, NULL);
+}
+
+void WS2812_StopCycle(void)
+{
+    WS2812_StopEffect();
+}
+
+#ifdef WS2812_HOST_TEST
+/* Test hooks: run one frame as the task would, and peek at the state. */
+void ws2812_test_fx_step(void)
+{
+    if (s_ctx != NULL && s_ctx->fx_on)
     {
-        cycle_step_locked();
+        fx_step_locked();
     }
 }
-bool ws2812_test_cycle_on(void)  { return s_ctx != NULL && s_ctx->cycle_on; }
-uint32_t ws2812_test_cycle_ms(void) { return s_ctx != NULL ? s_ctx->cycle_ms : 0U; }
+bool     ws2812_test_fx_on(void) { return s_ctx != NULL && s_ctx->fx_on; }
+uint32_t ws2812_test_fx_ms(void) { return s_ctx != NULL ? s_ctx->fx_ms : 0U; }
+int      ws2812_test_fx(void)    { return s_ctx != NULL ? (int)s_ctx->fx : -1; }
 #endif
 
 /* ---- text commands ------------------------------------------------------- */
@@ -489,16 +680,60 @@ static bool at_end(const char *p)
     return *p == '\0';
 }
 
-/* Matches keyword kw at *p, followed by a space or end of text. */
+/* Matches keyword kw at *p (after spaces), followed by a space or end of text. */
 static bool keyword(const char **p, const char *kw)
 {
-    size_t n = strlen(kw);
-    if (strncmp(*p, kw, n) == 0 && ((*p)[n] == ' ' || (*p)[n] == '\0'))
+    const char *q = *p;
+    while (*q == ' ')
     {
-        *p += n;
+        q++;
+    }
+    size_t n = strlen(kw);
+    if (strncmp(q, kw, n) == 0 && (q[n] == ' ' || q[n] == '\0'))
+    {
+        *p = q + n;
         return true;
     }
     return false;
+}
+
+/* "[ms] [r g b]" after a pattern name.  ms = 0 means the pattern's default. */
+static bool parse_fx_args(const char *p, uint32_t *ms, uint8_t rgb[3], bool *has_rgb)
+{
+    uint32_t v[4];
+    uint32_t n = 0U;
+
+    while (!at_end(p))
+    {
+        if (n >= 4U || !next_number(&p, WS2812_FX_MAX_MS, &v[n]))
+        {
+            return false;
+        }
+        n++;
+    }
+
+    *ms      = 0U;
+    *has_rgb = false;
+
+    if (n == 1U || n == 4U)
+    {
+        *ms = v[0];
+        if (*ms == 0U)
+        {
+            return false;
+        }
+    }
+    if (n == 3U || n == 4U)
+    {
+        const uint32_t *c = &v[n - 3U];
+        if (c[0] > 255U || c[1] > 255U || c[2] > 255U)
+        {
+            return false;
+        }
+        rgb[0] = (uint8_t)c[0]; rgb[1] = (uint8_t)c[1]; rgb[2] = (uint8_t)c[2];
+        *has_rgb = true;
+    }
+    return n != 2U;
 }
 
 bool WS2812_HandleCommand(const char *command, bool *ok)
@@ -512,20 +747,24 @@ bool WS2812_HandleCommand(const char *command, bool *ok)
     }
 
     const char *p = command + sizeof(prefix) - 1U;
-    while (*p == ' ')
-    {
-        p++;
-    }
-
     uint32_t a, b, c, d;
 
     if (keyword(&p, "off"))
     {
         if (at_end(p))
         {
-            WS2812_StopCycle();
+            WS2812_StopEffect();
             WS2812_Clear();
             result = WS2812_Show();
+        }
+    }
+    else if (keyword(&p, "stop"))
+    {
+        /* Freeze the pattern on its current frame. */
+        if (at_end(p))
+        {
+            WS2812_StopEffect();
+            result = true;
         }
     }
     else if (keyword(&p, "fill"))
@@ -533,7 +772,7 @@ bool WS2812_HandleCommand(const char *command, bool *ok)
         if (next_number(&p, 255U, &a) && next_number(&p, 255U, &b) &&
             next_number(&p, 255U, &c) && at_end(p))
         {
-            WS2812_StopCycle();
+            WS2812_StopEffect();
             WS2812_Fill((uint8_t)a, (uint8_t)b, (uint8_t)c);
             result = WS2812_Show();
         }
@@ -544,14 +783,14 @@ bool WS2812_HandleCommand(const char *command, bool *ok)
             next_number(&p, 255U, &b) && next_number(&p, 255U, &c) &&
             next_number(&p, 255U, &d) && at_end(p))
         {
-            WS2812_StopCycle();
+            WS2812_StopEffect();
             WS2812_SetPixel(a, (uint8_t)b, (uint8_t)c, (uint8_t)d);
             result = WS2812_Show();
         }
     }
     else if (keyword(&p, "brightness"))
     {
-        /* Does not stop a running cycle; it applies to it. */
+        /* Does not stop a running pattern; it applies to it. */
         if (next_number(&p, 255U, &a) && at_end(p))
         {
             WS2812_SetBrightness((uint8_t)a);
@@ -560,13 +799,32 @@ bool WS2812_HandleCommand(const char *command, bool *ok)
     }
     else if (keyword(&p, "cycle"))
     {
+        /* Kept for compatibility: same as "strip run cycle [ms]". */
         if (at_end(p))
         {
-            result = WS2812_StartCycle(WS2812_CYCLE_DEFAULT_MS);
+            result = WS2812_StartEffect(WS2812_FX_CYCLE, 0U, NULL);
         }
-        else if (next_number(&p, WS2812_CYCLE_MAX_MS, &a) && at_end(p))
+        else if (next_number(&p, WS2812_FX_MAX_MS, &a) && at_end(p) && a > 0U)
         {
-            result = WS2812_StartCycle(a);
+            result = WS2812_StartEffect(WS2812_FX_CYCLE, a, NULL);
+        }
+    }
+    else if (keyword(&p, "run"))
+    {
+        for (uint32_t fx = 0U; fx < (uint32_t)WS2812_FX_COUNT; fx++)
+        {
+            if (keyword(&p, k_fx[fx].name))
+            {
+                uint32_t ms;
+                uint8_t  rgb[3];
+                bool     has_rgb;
+                if (parse_fx_args(p, &ms, rgb, &has_rgb))
+                {
+                    result = WS2812_StartEffect((ws2812_fx_t)fx, ms,
+                                                has_rgb ? rgb : NULL);
+                }
+                break;
+            }
         }
     }
 

@@ -111,7 +111,7 @@ static void app_iotc_command_cb(IotclC2dEventData data)
         APP_IOTC_PRNT("LED RED: OFF\r\n");
         app_deviceData.LED_Red = false;
     } else if (WS2812_HandleCommand(command, &handled)) {
-        /* "strip fill|pixel|brightness|off ..." -> WS2812B strip on mikroBUS MOSI */
+        /* "strip fill/pixel/brightness/off/run/stop/cycle ..." -> WS2812B strip (ws2812_spi.h) */
         APP_IOTC_PRNT("LED STRIP: %s (%s)\r\n", command, handled ? "ok" : "failed");
     } else {
         APP_IOTC_PRNT("Unknown COMMAND: %s\r\n", command);
